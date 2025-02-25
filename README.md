@@ -116,7 +116,7 @@ GitHub Repository: [LinuxGSM GitHub](https://github.com/GameServerManagers/Linux
 
 ## Reporting Issues or Suggesting Improvements
 
-If you encounter bugs or have suggestions for improvements, please submit them in the [Issues](https://github.com/Deadalus3010/armamm/issues) section on GitHub.
+If you encounter bugs or have suggestions for improvements, please submit them in the [Issues](https://github.com/fiskce/Arma3-Server-Mod-Manager-Linux/issues) section on GitHub.
 
 ---
 
