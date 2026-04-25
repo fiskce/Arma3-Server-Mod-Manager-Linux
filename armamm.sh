@@ -1,7 +1,7 @@
 #!/bin/bash
 
 ###=======================================================================================###
-###     Author:  @fiskce / @Deadalus3010	                        Date: 23/1/2025   ###                        
+###     Author:  @fiskce / @Deadalus3010	                        Date: 25/4/2026   ###                        
 ###=======================================================================================###                ______________ ___________
 ###                                                                                       ###               / __/  _/ __/ //_/ ___/ __/
 ###                               Arma 3 Linux Server Manager                             ###              / _/_/ /_\ \/ ,< / /__/ _/  
@@ -13,20 +13,44 @@
 
 #	PLEASE EDIT THESE VALUES
 #	Currently only possible with one server, so create the script for each server individually
-#	Do not forget to change the User
+#
+#	Paths default to $HOME so the script follows whatever user account you installed
+#	LinuxGSM under (e.g. 'arma3server', 'lgsm', or anything else). If your install does
+#	not use the current user's home directory, override the variables below with absolute paths.
+#
+#	NOTE: Anonymous login no longer works for the Arma 3 Workshop. You MUST provide a
+#	Steam account that owns Arma 3. The "anonymous" user can no longer download Arma 3
+#	workshop content. If you leave the credentials blank, downloads/updates will fail.
+#
+#	NOTE: If your Steam account uses Steam Guard (it almost certainly does), run
+#	steamcmd interactively ONCE before using this script:
+#	    "$steamcmd" +login YOUR_USERNAME YOUR_PASSWORD +quit
+#	Enter the Steam Guard code when prompted. steamcmd caches the session token, after
+#	which this script will work non-interactively. If you ever change Steam Guard methods,
+#	reset your password, or log out everywhere, you must redo this step before the script
+#	will work again. LinuxGSM's installer is supposed to handle this but is currently
+#	buggy (the prompt does not always appear), so doing it manually first is recommended.
 
+
+#	Steam Credentials (REQUIRED - anonymous login no longer works for Arma 3)
+steamuser=''
+steampass=''
+
+#	Server's home directory (defaults to the home directory of whoever runs the script)
+#	Override this if your LinuxGSM user differs (e.g. /home/arma3server)
+serverhome="$HOME"
 
 #	ArmA 3 Workshop Content Directory
-workshoppath='/home/lgsm/.steam/steamapps/workshop/content/107410/'
+workshoppath="$serverhome/.steam/steam/steamapps/workshop/content/107410/"
 
 #	ArmA 3 Mods Directory
-modpath='/home/lgsm/arma/serverfiles/mods'
+modpath="$serverhome/serverfiles/mods"
 
 #	ArmA 3 Keys Directory
-keypath='/home/lgsm/arma/serverfiles/keys'
+keypath="$serverhome/serverfiles/keys"
 
 #	lgsm SteamCMD path & game gameid
-steamcmd='/home/lgsm/.steam/steamcmd/steamcmd.sh'
+steamcmd="$serverhome/.steam/steamcmd/steamcmd.sh"
 gameid='107410'	# ArmA 3
 
 
@@ -54,6 +78,51 @@ gameid='107410'	# ArmA 3
 
 
 
+
+#
+#	Wrapper around steamcmd that:
+#	  - injects the configured login (or anonymous if none set, with a warning)
+#	  - returns steamcmd's actual exit status so callers can detect failures
+#	  - checks output for known failure markers steamcmd does not always reflect in $?
+#
+#	Usage: steamcmd_run <workshop_id>
+#	Returns 0 on success, non-zero on failure.
+#
+function steamcmd_run() {
+	local wsid="$1"
+	local logintokens
+	local out
+	local rc
+
+	if [[ -n "$steamuser" && -n "$steampass" ]]; then
+		logintokens=(+login "$steamuser" "$steampass")
+	elif [[ -n "$steamuser" ]]; then
+		logintokens=(+login "$steamuser")
+	else
+		echo -e "   $(tput setaf 1)WARNING:$(tput setaf 7) No Steam credentials configured. Anonymous login does not work for Arma 3 - this download will likely fail."
+		logintokens=(+login anonymous)
+	fi
+
+	#	Capture output so we can scan for steamcmd's "soft" failures
+	#	(steamcmd often prints ERROR/Timeout but still exits 0)
+	out=$("${steamcmd}" "${logintokens[@]}" +workshop_download_item "${gameid}" "${wsid}" validate +quit 2>&1)
+	rc=$?
+	echo "$out"
+
+	if (( rc != 0 )); then
+		return $rc
+	fi
+
+	#	Detect common steamcmd download failures that don't set a non-zero exit code
+	if echo "$out" | grep -qiE 'ERROR! (Timeout downloading item|Download item .* failed|Failed to install)'; then
+		return 1
+	fi
+	if echo "$out" | grep -qi 'Login Failure'; then
+		return 1
+	fi
+
+	return 0
+}
 
 #	Lowercases all mods
 function lowercase() {
@@ -279,13 +348,26 @@ function dlworkshop() {
 		echo -e "\n\n   $(tput setaf 2)mod $i: ${workshop[$i]} $(tput setaf 7)| $(tput setaf 3)$j mod(s) left \n\n$(tput setaf 7)"
 
 		#Here we download the workshop mods
-		"${steamcmd}" +login anonymous +workshop_download_item "${gameid}" "${workshop[$i]}" validate +quit
+		if ! steamcmd_run "${workshop[$i]}"; then
+			echo -e "\n   $(tput setaf 1)ERROR:$(tput setaf 7) steamcmd failed to download mod ${workshop[$i]}. Skipping symlink."
+			let i+=1
+			let j-=1
+			continue
+		fi
+
+		#Verify the mod folder actually exists before symlinking
+		if [[ ! -d "$workshoppath${workshop[$i]}" ]]; then
+			echo -e "\n   $(tput setaf 1)ERROR:$(tput setaf 7) Mod folder $workshoppath${workshop[$i]} does not exist after download. Skipping symlink."
+			let i+=1
+			let j-=1
+			continue
+		fi
 
         #Symlink mods into $modpath directory
         #This saves huge amount of disk space
         #Because, for each arma server you use, you only need to have a link to the modfiles inside the /mods directory
         #And no mod files, e.g. 5 servers use the same mod folder, instead of having 5 different unique mod folders
-        ln -s "$workshoppath${workshop[$i]}" "$modpath"
+        ln -sf "$workshoppath${workshop[$i]}" "$modpath"
 
 		#Now we add one, so we download the next item
 		let i+=1
@@ -312,30 +394,50 @@ function addkeys() {
     countmods
 
 	#We check the workshop path and only write the workshop mods inside this array
-	readarray -d '' wppdir_ar < <(find $workshoppath -mindepth 1 -maxdepth 1 -type d -print0)
+	readarray -d '' wppdir_ar < <(find "$workshoppath" -mindepth 1 -maxdepth 1 -type d -print0)
 	typeset -i j=0 maxj=${#wppdir_ar[*]}
 
 	#
-	#	Now we loop through the workshop paths array
-	#	So that the .bikey and mod/meta.cpp files belong to the same mod
+	#	Build two parallel arrays in lockstep:
+	#	  bikey_ar[i]  = full path to a .bikey file
+	#	  bikeyowner_ar[i] = path to the mod folder that .bikey came from
+	#	(Previously these were not in sync because mods can have 0 or many .bikeys
+	#	but only one mod.cpp/meta.cpp - which is why some keys appeared mislabeled
+	#	and the loop hung past the last labeled mod.)
 	#
-	while (( j < maxj ))
-	do
-		#We write all the .bikey paths in the bikey_ar array
-		bikey_ar+=($(find ${wppdir_ar[$j]} -name '*.bikey'))
-
-		#Here we try to make it easier for you, because we not only display the .bikey, but also the mods name
-		#And how do we get the name? First, we need to get the path to the mod file
-		modname_ar+=($(find ${wppdir_ar[$j]} -name "mod.cpp" -o -name "meta.cpp" | head -n 1))
-
+	bikey_ar=()
+	bikeyowner_ar=()
+	while (( j < maxj )); do
+		local moddir="${wppdir_ar[$j]}"
+		local mod_keys=()
+		readarray -d '' mod_keys < <(find "$moddir" -name '*.bikey' -print0)
+		for k in "${mod_keys[@]}"; do
+			bikey_ar+=("$k")
+			bikeyowner_ar+=("$moddir")
+		done
 		j=j+1
 	done
 
 	typeset -i i=0 max=${#bikey_ar[*]}
 
+	if (( max == 0 )); then
+		echo -e "   $(tput setaf 3)No .bikey files found in $workshoppath$(tput setaf 7)"
+		return 0
+	fi
+
 	while (( i < max ))
-	do															                               #To get the Modname, we grep the "name" string, we also limit grep to "first found"
-		echo -e "   $(tput setaf 2)Bikey $i: ${bikey_ar[$i]:${#workshoppath}}$(tput setaf 7) | $(tput setaf 3)$(grep -m 1 'name' ${modname_ar[$i]} | awk '{ print substr( $0, 9 )}' | awk '{ print substr( $0, 1, length($0)-3 )}')$(tput setaf 7)"
+	do
+		#Look up the mod's display name from the folder that owns this .bikey
+		local owner="${bikeyowner_ar[$i]}"
+		local modcpp
+		modcpp=$(find "$owner" -name "mod.cpp" -o -name "meta.cpp" 2>/dev/null | head -n 1)
+
+		local modname="(unknown)"
+		if [[ -n "$modcpp" && -f "$modcpp" ]]; then
+			modname=$(grep -m 1 'name' "$modcpp" | awk '{ print substr( $0, 9 )}' | awk '{ print substr( $0, 1, length($0)-3 )}')
+		fi
+
+		echo -e "   $(tput setaf 2)Bikey $i: ${bikey_ar[$i]:${#workshoppath}}$(tput setaf 7) | $(tput setaf 3)$modname$(tput setaf 7)"
 
 		unset yn
 		read -p "   ?:" yn
@@ -349,10 +451,12 @@ function addkeys() {
 			do
 				read -p "   ?:" yn
 			done
-		elif [[  "$yn" == "1" ]]
+		fi
+
+		if [[  "$yn" == "1" ]]
 		then
 
-            cp -u ${bikey_ar[$i]} $keypath #-u -> copy only when the SOURCE file is newer than the destination file or when the destination file is missing
+            cp -u "${bikey_ar[$i]}" "$keypath" #-u -> copy only when the SOURCE file is newer than the destination file or when the destination file is missing
 
 			#Here we catch the cp response, to check if errors occured
 			if [ $? -ne 0 ]
@@ -376,7 +480,7 @@ function removekeys() {
 
 	#We write all the .bikey paths in the kbikey_ar array | k = keys direcotory
 	#We also exclude the "a3.bikey", this is an important server file, without it, no one can join your server
-	readarray -d '' kbikey_ar < <(find $keypath -name '*.bikey' ! -name "a3.bikey" -print0)	#! -path 'a3.*'  ! -name "a3.bikey"
+	readarray -d '' kbikey_ar < <(find "$keypath" -name '*.bikey' ! -name "a3.bikey" -print0)
 	typeset -i i=0 max=${#kbikey_ar[*]}
 
 	echo -e "   Found: $max *.bikey files in $keypath\n"
@@ -386,16 +490,24 @@ function removekeys() {
 
 		unset yn
 
-		#Here we try to find the .bikey in the workshoppath directory, so we can find the mod or meta.cpp to get the modname
-		mod_ar=($(find $workshoppath -name ${kbikey_ar[i]:${#keypath}+1} | head -n 1))
+		#Find the .bikey in the workshop dir to identify the owning mod
+		local keyname="${kbikey_ar[i]:${#keypath}+1}"
+		local found_key
+		found_key=$(find "$workshoppath" -name "$keyname" -print -quit 2>/dev/null)
 
-		#This isnt the best solution to go back 2 directories, but I didnt found any better one
-		dirname=($(dirname "$(dirname "$mod_ar")"))
+		local modname="(unknown)"
+		if [[ -n "$found_key" ]]; then
+			#Walk up to the mod folder (the one directly under $workshoppath)
+			local moddir
+			moddir=$(dirname "$(dirname "$found_key")")
+			local modcpp
+			modcpp=$(find "$moddir" -name "mod.cpp" -o -name "meta.cpp" 2>/dev/null | head -n 1)
+			if [[ -n "$modcpp" && -f "$modcpp" ]]; then
+				modname=$(grep -m 1 'name' "$modcpp" | awk '{ print substr( $0, 9 )}' | awk '{ print substr( $0, 1, length($0)-3 )}')
+			fi
+		fi
 
-		#Here we get the actual modname of the .bikey
-		modname_ar=($(find $dirname -name "mod.cpp" -o -name "meta.cpp" | head -n 1))
-
-		echo -e "   $(tput setaf 2)Bikey $i: ${kbikey_ar[$i]:${#keypath}}$(tput setaf 7) | $(tput setaf 3)$(grep -m 1 'name' $modname_ar | awk '{ print substr( $0, 9 )}' | awk '{ print substr( $0, 1, length($0)-3 )}')$(tput setaf 7)" #We limit grep to "first found"
+		echo -e "   $(tput setaf 2)Bikey $i: ${kbikey_ar[$i]:${#keypath}}$(tput setaf 7) | $(tput setaf 3)$modname$(tput setaf 7)"
 
 		read -p "   ?:" yn
 
@@ -408,9 +520,11 @@ function removekeys() {
 			do
 				read -p "   ?:" yn
 			done
-		elif [[  "$yn" == "1" ]]
+		fi
+
+		if [[  "$yn" == "1" ]]
 		then
-            rm ${kbikey_ar[$i]} #Here we delete the .bikey file, bye bye, you wont be missed :) (hopefully)
+            rm "${kbikey_ar[$i]}" #Here we delete the .bikey file, bye bye, you wont be missed :) (hopefully)
 		fi
 		i+=1
 	done
@@ -447,7 +561,9 @@ function updatemods() {
 	do
 		echo -e "\n\n$(tput setaf 2)Index: $i | Mod: ${wppdir_ar[i]:${#workshoppath}}$(tput setaf 7) | $(tput setaf 3)$(grep -m 1 'name' ${modname_ar[$i]})\n\n\n$(tput setaf 7)"
 
-		"${steamcmd}" +login anonymous +workshop_download_item "${gameid}" ${wppdir_ar[i]:${#workshoppath}} validate +quit
+		if ! steamcmd_run "${wppdir_ar[i]:${#workshoppath}}"; then
+			echo -e "   $(tput setaf 1)ERROR:$(tput setaf 7) steamcmd failed to update ${wppdir_ar[i]:${#workshoppath}}."
+		fi
 	done
 }
 
@@ -475,7 +591,9 @@ function cronupdatemods() {
 
 		echo -e "\n\nNumber: $j | Mod: ${wppdir_ar[j]:${#workshoppath}} $(grep -m 1 'name' ${modname_ar[$j]})\n\n\n"
 
-		"${steamcmd}" +login anonymous +workshop_download_item "${gameid}" ${wppdir_ar[j]:${#workshoppath}} validate +quit
+		if ! steamcmd_run "${wppdir_ar[j]:${#workshoppath}}"; then
+			echo -e "   $(tput setaf 1)ERROR:$(tput setaf 7) steamcmd failed to update ${wppdir_ar[j]:${#workshoppath}}."
+		fi
 
 		j=j+1
 	done
